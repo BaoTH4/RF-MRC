@@ -4,7 +4,7 @@ Flipped Machine Reading Comprehension" (Link: (https://aclanthology.org/2021.fin
 
 Author: Guoxin Yu, Jiwei Li, Ling Luo, Yuxian Meng, Xiang Ao, Qing He
 
-####Data preprocess
+#Data preprocess
 
 ```
 python process_data.py
@@ -12,7 +12,7 @@ python make_tokenized_data.py
 python make_standard_data.py
 ```
 
-####Training  model
+#Training  model
 ```
 python main.py --mode train
 ```
