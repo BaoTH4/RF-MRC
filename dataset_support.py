@@ -249,7 +249,11 @@ def generating_next_query(batch_dict,logits,last_queries,args,query_type='aspect
     passenge_index = (last_queries[idx]==SEP_id).nonzero(as_tuple=True)[0]
     passenge_index = torch.tensor([num for num in range(passenge_index[0].item()+1,passenge_index[1].item())],dtype=torch.long).unsqueeze(1)
     labels=ind_tensor[passenge_index].squeeze(1)
-    ignore_index=torch.tensor(batch_dict['ignore_indexes'][idx]).view(-1) == -1
+    if 'deberta' in args.model_type:
+      index=torch.tensor(batch_dict['ignore_indexes'][idx])
+      ignore_index=(index == -1).nonzero(as_tuple=True)[0]
+    else:
+      ignore_index=torch.tensor([])
     ##Xử lý khi 1 không có trong labels của bước multi hop hiện tại
     if 1 not in labels:
       if model_mode=='train':

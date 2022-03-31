@@ -171,8 +171,11 @@ class RoleFlippedModule(nn.Module):
       passenge_labels=prob_label[passenge_index].squeeze(1)
       passenge_prob_vals=prob_val[passenge_index].squeeze(1)
       _,index_list=torch.sort(passenge_prob_vals,descending=True)
-      index=torch.tensor(batch_dict['ignore_indexes'][i])
-      ignore_index=(index == -1).nonzero(as_tuple=True)[0]
+      if 'deberta' in self.model_type:
+        index=torch.tensor(batch_dict['ignore_indexes'][i])
+        ignore_index=(index == -1).nonzero(as_tuple=True)[0]
+      else:
+        ignore_index=torch.tensor([])
       ##Tương tự xử lý khi không xuất hiện nhãn 1 trong dự đoán
       if 1 not in passenge_labels:
         if model_mode=='train':
@@ -294,11 +297,12 @@ class MatchingModule(nn.Module):
     _aspects_list=[]
     _opinions_list=[]
     lossS=0
-    pred_list=[]
-    y_true_list=[]
     for i in range(len(result_dict['A2O_aspects_list'])):
-      index=torch.tensor(batch_dict['ignore_indexes'][i])
-      ignore_index=(index == -1).nonzero(as_tuple=True)[0]
+      if 'deberta' in self.model_type:
+        index=torch.tensor(batch_dict['ignore_indexes'][i])
+        ignore_index=(index == -1).nonzero(as_tuple=True)[0]
+      else:
+        ignore_index=torch.tensor([])
       aspects_list=[]
       opinions_list=[]
       ##A2O
