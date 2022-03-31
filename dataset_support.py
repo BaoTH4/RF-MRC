@@ -1,9 +1,14 @@
+# -*- coding: utf-8 -*-
+
 import random
 import torch
 import torch.nn.functional as F
 
-CLS_id=101
-SEP_id=102
+##CLS_id=101 ##For BERT
+#SEP_id=102 ##For BERT
+
+CLS_id=1 ##For Deberta
+SEP_id=2 ##For Deberta
 
 def generating_batch_index(dataset,batch_size,shuffle=True,drop_last=False):
   '''
@@ -11,7 +16,7 @@ def generating_batch_index(dataset,batch_size,shuffle=True,drop_last=False):
   '''
   idx_list=[i for i in range(dataset.__len__())]
   if shuffle==True:
-    random.shuffle(idx_list)
+    random.Random(42).shuffle(idx_list)
   ##Slitting idx into batch
   start=0
   end=start+batch_size
@@ -142,26 +147,33 @@ def generating_model_dataset(dataset,batch_size,shuffle=True,drop_last=False,ist
   for batch_idx in batch_idxes:
     sample_list=[]
     texts_ids=[]
+    texts=[]
     aspect_questions_ids=[]
     opinion_questions_ids=[]
     aspect_answers=[]
     opinion_answers=[]
     sentiments=[]
+    ignore_indexes = [] ##Những vị trí bỏ qua nếu sử dụng mô hình pretrained dạng BPE
+
     max_len=0
     for idx in batch_idx:
       sample=dataset.getIndexSample(idx)
       sample_list.append(sample)
+      texts.append(sample['text'])
       texts_ids.append(sample['text_ids'])
       aspect_questions_ids.append(sample['aspect_question_ids'])
       opinion_questions_ids.append(sample['opinion_question_ids'])
       aspect_answers.append(sample['aspect_answer'])
       opinion_answers.append(sample['opinion_answer'])
       sentiments.append(sample['sentiment'])
+      ignore_indexes.append(sample['ignore_index'])
+
       if len(sample['text_ids'])+3>max_len:
         max_len=len(sample['text_ids'])+3
     if istrain==True:
       initial_queries,initial_masks,initial_segs,initial_aspect_answers,initial_opinion_answers=genrating_batch_data(sample_list,istrain=istrain,max_len=max_len,ifgpu=ifgpu)
       yield {
+          'texts': texts,
           'texts_ids':texts_ids,
           'initial_input_ids':initial_queries,
           'initial_attention_mask':initial_masks,
@@ -172,18 +184,21 @@ def generating_model_dataset(dataset,batch_size,shuffle=True,drop_last=False,ist
           'opinion_questions_ids':opinion_questions_ids,
           'aspect_answers':aspect_answers,
           'opinion_answers':opinion_answers,
-          'sentiments':sentiments
+          'sentiments':sentiments,
+          'ignore_indexes':ignore_indexes
       }
     elif istrain==False:
       initial_queries,initial_masks,initial_segs=genrating_batch_data(sample_list,istrain=istrain,max_len=max_len,ifgpu=ifgpu)
       yield {
+          'texts': texts,
           'texts_ids':texts_ids,
           'initial_input_ids':initial_queries,
           'initial_attention_mask':initial_masks,
           'initial_token_type_ids':initial_segs,
           'aspect_answers':aspect_answers,
           'opinion_answers':opinion_answers,
-          'sentiments':sentiments
+          'sentiments':sentiments,
+          'ignore_indexes':ignore_indexes
       }
 
 def padding_query_batch(input_ids_list,attention_mask_list,token_type_ids_list,answer_list,max_len=None,ifgpu=True):
@@ -231,9 +246,10 @@ def generating_next_query(batch_dict,logits,last_queries,args,query_type='aspect
   answer_list=[]
   max_len=0
   for idx,ind_tensor in enumerate(top_ind):
-    passenge_index = (last_queries[idx]==102).nonzero(as_tuple=True)[0]
+    passenge_index = (last_queries[idx]==SEP_id).nonzero(as_tuple=True)[0]
     passenge_index = torch.tensor([num for num in range(passenge_index[0].item()+1,passenge_index[1].item())],dtype=torch.long).unsqueeze(1)
     labels=ind_tensor[passenge_index].squeeze(1)
+    ignore_index=torch.tensor(batch_dict['ignore_indexes'][idx]).view(-1) == -1
     ##Xử lý khi 1 không có trong labels của bước multi hop hiện tại
     if 1 not in labels:
       if model_mode=='train':
@@ -241,23 +257,20 @@ def generating_next_query(batch_dict,logits,last_queries,args,query_type='aspect
       else:
         outside_query=[]
         prob_i=prob[idx].transpose(0,1)[1]
-        passenge_prob_i=prob_i[passenge_index].squeeze(1)
+        passenge_prob_i=prob_i[passenge_index].squeeze(1) ##Trích chọn xác suất ở những ký tự của câu có nhãn 1
         _,one_index=torch.sort(passenge_prob_i,descending=True)
         new_top_val=top_val[idx][passenge_index].squeeze(1)
         ##Kiểm tra nếu không có cả nhãn 0 và 1 nghĩa là full nhãn 2
-        if 0 not in labels:
-          two_index=torch.tensor([])
-        else:
-          two_index=(labels == 2).nonzero(as_tuple=True)[0]
+        two_index=torch.tensor([])
         count=0
         for index in one_index:
           inde=index.item()
-          if inde in two_index:
+          if inde in ignore_index:
             continue
           outside_query.append(batch_dict['texts_ids'][idx][inde])
           count+=1
           inde+=1
-          while inde < len(batch_dict['texts_ids'][idx]) and inde in two_index:
+          while inde < len(batch_dict['texts_ids'][idx]) and inde in ignore_index:
             outside_query.append(batch_dict['texts_ids'][idx][inde])
             inde+=1
           if query_type=='aspect':
@@ -287,7 +300,7 @@ def generating_next_query(batch_dict,logits,last_queries,args,query_type='aspect
           outside_query.append(batch_dict['texts_ids'][idx][inde])
           count+=1
           inde+=1
-          while inde < len(batch_dict['texts_ids'][idx]) and inde in two_index:
+          while inde < len(batch_dict['texts_ids'][idx]) and (inde in two_index or inde in ignore_index):
             outside_query.append(batch_dict['texts_ids'][idx][inde])
             inde+=1
           if query_type=='aspect':
@@ -298,7 +311,7 @@ def generating_next_query(batch_dict,logits,last_queries,args,query_type='aspect
               break
         else:
           continue
-      outside_query=outside_query[:-1]
+      ##outside_query=outside_query[:-1]
       input_ids,attention_mask,token_type_ids,answer=generating_one_query(batch_dict,query_type=query_type,index=idx,outside_query=outside_query,model_mode=model_mode)
       if len(input_ids)>max_len:
         max_len=len(input_ids)

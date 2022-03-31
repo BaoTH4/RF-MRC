@@ -1,6 +1,6 @@
 import torch.nn as nn
-from transformers import BertTokenizer,BertModel
-from utils import calculate_A_O_loss
+from transformers import BertTokenizer,BertModel, DebertaV2Tokenizer, DebertaV2Model
+from utils import calculate_A_O_loss, sentiment_loss
 from dataset_support import generating_next_query
 import torch
 import torch.nn.functional as F
@@ -17,12 +17,20 @@ class BertFFNN(nn.Module):
   def __init__(self,args):
     hidden_size=args.hidden_size
     super(BertFFNN,self).__init__()
-    self._bert = BertModel.from_pretrained(args.model_type)
-    self._tokenizer = BertTokenizer.from_pretrained(args.model_type)
+    if 'deberta' in args.model_type:
+      self._bert = DebertaV2Model.from_pretrained(args.model_type)
+      self._tokenizer = DebertaV2Tokenizer.from_pretrained(args.model_type)
+      self.sep_id=2
+    else:
+      self._bert = BertModel.from_pretrained(args.model_type)
+      self._tokenizer = BertTokenizer.from_pretrained(args.model_type)
+      self.sep_id=102
+
     print(f"Loaded `{args.model_type}` model !")
     
     self.asp_ffnn=nn.Linear(hidden_size,3)
     self.opi_ffnn=nn.Linear(hidden_size,3)
+
   def forward(self,input_ids=[], attention_mask=[], token_type_ids=[],answer='aspect'):
     hidden_states = self._bert(
         input_ids,
@@ -47,9 +55,15 @@ class RoleFlippedModule(nn.Module):
     self._model=BertFFNN(args)  ##Thành phần cho chiều A2O
     self._model2=BertFFNN(args) ##Thành phần cho chiều O2A
 
-    if args.ifgpu==True:
+    if args.ifgpu==True and torch.cuda.is_available():
       self._model.cuda()
       self._model2.cuda()
+
+    if 'deberta' in args.model_type:
+      self.sep_id=2
+    else:
+      self.sep_id=102
+
     self.args=args
   
   def forward(self,batch_dict,model_mode='train'):
@@ -64,7 +78,7 @@ class RoleFlippedModule(nn.Module):
     A2O_aspect_hidden_states,aspect_logits=self._model(batch_dict['initial_input_ids'],batch_dict['initial_attention_mask'],batch_dict['initial_token_type_ids'],answer='aspect')
     ##Nếu model đang trong quá trình train mới tính loss
     if model_mode=='train':
-      lossA+=self.args.lambda_aspect*calculate_A_O_loss(batch_dict['initial_aspect_answers'],aspect_logits,ifgpu=self.args.ifgpu)
+      lossA+=self.args.lambda_aspect*calculate_A_O_loss(batch_dict['initial_aspect_answers'],aspect_logits,ifgpu=self.args.ifgpu,ignore_indexes=batch_dict['ignore_indexes'],model_type=self.args.model_type)
     input_ids,attention_mask,token_type_ids,answers=generating_next_query(batch_dict,aspect_logits,batch_dict['initial_input_ids'],self.args,query_type='aspect',model_mode=model_mode)
     ##Multihop turn
     cur_answer='opinion'
@@ -73,14 +87,14 @@ class RoleFlippedModule(nn.Module):
         queries_for_opinion=input_ids
         A2O_opinion_hidden_states,opinion_logits=self._model(input_ids,attention_mask,token_type_ids,answer=cur_answer)
         if model_mode=='train': ##Tương tự chỉ tính loss cho model khi ở mode train (*)
-          lossO+=self.args.lambda_opinion*calculate_A_O_loss(answers,opinion_logits,ifgpu=self.args.ifgpu)
+          lossO+=self.args.lambda_opinion*calculate_A_O_loss(answers,opinion_logits,ifgpu=self.args.ifgpu,ignore_indexes=batch_dict['ignore_indexes'],model_type=self.args.model_type)
         input_ids,attention_mask,token_type_ids,answers=generating_next_query(batch_dict,opinion_logits,queries_for_opinion,self.args,query_type=cur_answer,model_mode=model_mode)
         cur_answer='aspect'
       elif cur_answer=='aspect':
         queries_for_aspect=input_ids
         A2O_aspect_hidden_states,aspect_logits=self._model(input_ids,attention_mask,token_type_ids,answer=cur_answer)
         if model_mode=='train':##(*)
-          lossA+=self.args.lambda_aspect*calculate_A_O_loss(answers,aspect_logits,ifgpu=self.args.ifgpu)
+          lossA+=self.args.lambda_aspect*calculate_A_O_loss(answers,aspect_logits,ifgpu=self.args.ifgpu,ignore_indexes=batch_dict['ignore_indexes'],model_type=self.args.model_type)
         input_ids,attention_mask,token_type_ids,answers=generating_next_query(batch_dict,aspect_logits,queries_for_aspect,self.args,query_type=cur_answer,model_mode=model_mode)
         cur_answer='opinion'
     A2O_aspect_hidden_states,A2O_aspects_list,A2O_opinion_hidden_states,A2O_opinions_list=self.processOutput(A2O_aspect_hidden_states,A2O_opinion_hidden_states,aspect_logits,opinion_logits,queries_for_aspect,queries_for_opinion,batch_dict,model_mode=model_mode)
@@ -93,7 +107,7 @@ class RoleFlippedModule(nn.Module):
     ##Initial
     O2A_opinion_hidden_states,opinion_logits=self._model2(batch_dict['initial_input_ids'],batch_dict['initial_attention_mask'],batch_dict['initial_token_type_ids'],answer='opinion')
     if model_mode=='train':##(*)
-      lossO+=self.args.lambda_opinion*calculate_A_O_loss(batch_dict['initial_opinion_answers'],opinion_logits,ifgpu=self.args.ifgpu)
+      lossO+=self.args.lambda_opinion*calculate_A_O_loss(batch_dict['initial_opinion_answers'],opinion_logits,ifgpu=self.args.ifgpu,ignore_indexes=batch_dict['ignore_indexes'],model_type=self.args.model_type)
     input_ids,attention_mask,token_type_ids,answers=generating_next_query(batch_dict,opinion_logits,batch_dict['initial_input_ids'],self.args,query_type='opinion',model_mode=model_mode)
     ##Multihop turn
     cur_answer='aspect'
@@ -102,14 +116,14 @@ class RoleFlippedModule(nn.Module):
         queries_for_aspect=input_ids
         O2A_aspect_hidden_states,aspect_logits=self._model2(input_ids,attention_mask,token_type_ids,answer=cur_answer)
         if model_mode=='train': ##(*)
-          lossA+=self.args.lambda_aspect*calculate_A_O_loss(answers,aspect_logits,ifgpu=self.args.ifgpu)
+          lossA+=self.args.lambda_aspect*calculate_A_O_loss(answers,aspect_logits,ifgpu=self.args.ifgpu,ignore_indexes=batch_dict['ignore_indexes'],model_type=self.args.model_type)
         input_ids,attention_mask,token_type_ids,answers=generating_next_query(batch_dict,aspect_logits,queries_for_aspect,self.args,query_type=cur_answer,model_mode=model_mode)
         cur_answer='opinion'
       elif cur_answer=='opinion':
         queries_for_opinion=input_ids
         O2A_opinion_hidden_states,opinion_logits=self._model2(input_ids,attention_mask,token_type_ids,answer=cur_answer)
         if model_mode=='train':##(*)
-          lossO+=self.args.lambda_opinion*calculate_A_O_loss(answers,opinion_logits,ifgpu=self.args.ifgpu)
+          lossO+=self.args.lambda_opinion*calculate_A_O_loss(answers,opinion_logits,ifgpu=self.args.ifgpu,ignore_indexes=batch_dict['ignore_indexes'],model_type=self.args.model_type)
         input_ids,attention_mask,token_type_ids,answers=generating_next_query(batch_dict,opinion_logits,queries_for_opinion,self.args,query_type=cur_answer,model_mode=model_mode)
         cur_answer='aspect'
     O2A_aspect_hidden_states,O2A_aspects_list,O2A_opinion_hidden_states,O2A_opinions_list=self.processOutput(O2A_aspect_hidden_states,O2A_opinion_hidden_states,aspect_logits,opinion_logits,queries_for_aspect,queries_for_opinion,batch_dict,model_mode=model_mode)
@@ -125,6 +139,7 @@ class RoleFlippedModule(nn.Module):
         'O2A_opinions_list':O2A_opinions_list,
         'lossA':lossA,
         'lossO':lossO,
+        'ignore_indexes':batch_dict['ignore_indexes']
     }
     ##If in training process we should add ground truth sentiment labels to result for calculate sentiment loss next step
     if model_mode=='train':
@@ -147,7 +162,7 @@ class RoleFlippedModule(nn.Module):
     opinion_hidden_states_list=[]
     for i in range(len(aspect_logits)):
       ##Aspect
-      passenge_index = (queries_for_aspect[i]==102).nonzero(as_tuple=True)[0]
+      passenge_index = (queries_for_aspect[i]==self.sep_id).nonzero(as_tuple=True)[0]
       passenge_index = torch.tensor([num for num in range(passenge_index[0].item()+1,passenge_index[1].item())],dtype=torch.long).unsqueeze(1)
       aspects=[]
       logits=aspect_logits[i]
@@ -156,6 +171,8 @@ class RoleFlippedModule(nn.Module):
       passenge_labels=prob_label[passenge_index].squeeze(1)
       passenge_prob_vals=prob_val[passenge_index].squeeze(1)
       _,index_list=torch.sort(passenge_prob_vals,descending=True)
+      index=torch.tensor(batch_dict['ignore_indexes'][i])
+      ignore_index=(index == -1).nonzero(as_tuple=True)[0]
       ##Tương tự xử lý khi không xuất hiện nhãn 1 trong dự đoán
       if 1 not in passenge_labels:
         if model_mode=='train':
@@ -168,23 +185,24 @@ class RoleFlippedModule(nn.Module):
           passenge_aspect_prob=_aspect_prob[passenge_index].squeeze(1)
           _,one_index=torch.sort(passenge_aspect_prob,descending=True)
           index_list=one_index
-        if 0 not in passenge_labels:
+        '''if 0 not in passenge_labels:
           two_index=torch.tensor([])
         else:
-          two_index=(passenge_labels == 2).nonzero(as_tuple=True)[0]
+          two_index=(passenge_labels == 2).nonzero(as_tuple=True)[0]'''
+        two_index=torch.tensor([])
       else:
         one_index=(passenge_labels == 1).nonzero(as_tuple=True)[0]
         two_index=(passenge_labels == 2).nonzero(as_tuple=True)[0]
       count=0
       for j in range(len(index_list)):
         idx=index_list[j].item()
-        if idx in two_index:
+        if idx in two_index or idx in ignore_index:
           continue
         if idx in one_index:
           aspect=[idx]
           count+=1
           idx+=1
-          while idx<len(passenge_index) and idx in two_index:
+          while idx<len(passenge_index) and (idx in two_index or idx in ignore_index):
             aspect.append(idx)
             idx+=1
           aspects.append(aspect)
@@ -195,7 +213,7 @@ class RoleFlippedModule(nn.Module):
       aspect_list.append(aspects)
       ##Opinion
       opinions=[]
-      passenge_index = (queries_for_opinion[i]==102).nonzero(as_tuple=True)[0]
+      passenge_index = (queries_for_opinion[i]==self.sep_id).nonzero(as_tuple=True)[0]
       passenge_index = torch.tensor([num for num in range(passenge_index[0].item()+1,passenge_index[1].item())],dtype=torch.long).unsqueeze(1)
       logits=opinion_logits[i]
       opinion_prob=F.softmax(logits,dim=-1)
@@ -215,23 +233,24 @@ class RoleFlippedModule(nn.Module):
           passenge_opinion_prob=_opinion_prob[passenge_index].squeeze(1)
           _,one_index=torch.sort(passenge_opinion_prob,descending=True)
           index_list=one_index
-        if 0 not in passenge_labels:
+        '''if 0 not in passenge_labels:
           two_index=torch.tensor([])
         else:
-          two_index=(passenge_labels == 2).nonzero(as_tuple=True)[0]
+          two_index=(passenge_labels == 2).nonzero(as_tuple=True)[0]'''
+        two_index=torch.tensor([])
       else:
         one_index=(passenge_labels == 1).nonzero(as_tuple=True)[0]
         two_index=(passenge_labels == 2).nonzero(as_tuple=True)[0]
       count=0
       for j in range(len(index_list)):
         idx=index_list[j].item()
-        if idx in two_index:
+        if idx in two_index or idx in ignore_index:
           continue
         if idx in one_index:
           opinion=[idx]
           count+=1
           idx+=1
-          while idx<len(passenge_index) and idx in two_index:
+          while idx<len(passenge_index) and (idx in two_index or idx in ignore_index):
             opinion.append(idx)
             idx+=1
           opinions.append(opinion)
@@ -241,11 +260,11 @@ class RoleFlippedModule(nn.Module):
           continue
       opinion_list.append(opinions)
       ##Aspect Hidden states
-      passenge_index = (queries_for_aspect[i]==102).nonzero(as_tuple=True)[0]
+      passenge_index = (queries_for_aspect[i]==self.sep_id).nonzero(as_tuple=True)[0]
       passenge_index = torch.tensor([num for num in range(passenge_index[0].item()+1,passenge_index[1].item())],dtype=torch.long)
       aspect_hidden_states_list.append(aspect_hidden_states[i,passenge_index,:])
       ##Opinion Hidden states
-      passenge_index = (queries_for_opinion[i]==102).nonzero(as_tuple=True)[0]
+      passenge_index = (queries_for_opinion[i]==self.sep_id).nonzero(as_tuple=True)[0]
       passenge_index = torch.tensor([num for num in range(passenge_index[0].item()+1,passenge_index[1].item())],dtype=torch.long)
       opinion_hidden_states_list.append(opinion_hidden_states[i,passenge_index,:])
     return aspect_hidden_states_list,aspect_list,opinion_hidden_states_list,opinion_list
@@ -264,6 +283,9 @@ class MatchingModule(nn.Module):
     if args.ifgpu==True:
       self.sent_ffnn_A2O.cuda()
       self.sent_ffnn_A2O.cuda()
+    
+    if 'deberta' in args.model_type:
+      self._tokenizer=DebertaV2Tokenizer.from_pretrained(args.model_type)
       
     self.args=args
 
@@ -272,7 +294,11 @@ class MatchingModule(nn.Module):
     _aspects_list=[]
     _opinions_list=[]
     lossS=0
+    pred_list=[]
+    y_true_list=[]
     for i in range(len(result_dict['A2O_aspects_list'])):
+      index=torch.tensor(batch_dict['ignore_indexes'][i])
+      ignore_index=(index == -1).nonzero(as_tuple=True)[0]
       aspects_list=[]
       opinions_list=[]
       ##A2O
@@ -282,8 +308,9 @@ class MatchingModule(nn.Module):
       A2O_opinion_hidden_states=result_dict['A2O_opinion_hidden_states'][i]
       final_hidden_states=self.matching(A2O_aspect_hidden_states,A2O_opinion_hidden_states,A2O_aspect_terms,A2O_opinion_terms,calc_type='all',direct='A2O')
       A2O_logits=[]
-      for row in final_hidden_states:
-        if torch.sum(row).item()==0:
+      for idx in range(len(final_hidden_states)):
+        row=final_hidden_states[idx]
+        if torch.sum(row).item()==0 or idx in ignore_index:
           A2O_logits.append([0]*3)
         else:
           A2O_logits.append(self.sent_ffnn_A2O(row).tolist())
@@ -295,8 +322,9 @@ class MatchingModule(nn.Module):
       O2A_opinion_hidden_states=result_dict['O2A_opinion_hidden_states'][i]
       final_hidden_states=self.matching(O2A_aspect_hidden_states,O2A_opinion_hidden_states,O2A_aspect_terms,O2A_opinion_terms,calc_type='all',direct='O2A')
       O2A_logits=[]
-      for row in final_hidden_states:
-        if torch.sum(row).item()==0:
+      for idx in range(len(final_hidden_states)):
+        row=final_hidden_states[idx]
+        if torch.sum(row).item()==0 or idx in ignore_index:
           O2A_logits.append([0]*3)
         else:
           O2A_logits.append(self.sent_ffnn_O2A(row).tolist())
@@ -319,7 +347,7 @@ class MatchingModule(nn.Module):
           temp_final_logits.append(token_logits.tolist())
           temp_sentiments.append(result_dict['sentiment_labels_list'][i][inde])
 
-        if self.args==True:
+        if self.args.ifgpu==True:
           temp_final_logits=torch.tensor(temp_final_logits).cuda()
           temp_sentiments=torch.tensor(temp_sentiments).cuda()
           weight = torch.tensor([1,2,4]).float().cuda()
@@ -328,13 +356,25 @@ class MatchingModule(nn.Module):
           temp_sentiments=torch.tensor(temp_sentiments)
           weight = torch.tensor([1,2,4]).float()
 
-        '''if self.args.ifgpu==True:
-          weight = torch.tensor([4,1,2]).float().cuda()
-          #sentiment_targets=torch.tensor(result_dict['sentiment_labels_list'][i]).cuda()
-        else:
-          weight = torch.tensor([4,1,2]).float()
-          #sentiment_targets=torch.tensor(result_dict['sentiment_labels_list'][i])'''
         lossS+=F.cross_entropy(temp_final_logits,temp_sentiments,weight=weight,ignore_index=-1)
+      
+      '''if model_mode=='train':
+        pred=[]
+        y_true=[]
+        ##Trích xuất ra đúng những nhãn và logits của những tokens có logits khác không
+        for inde in range(len(final_logits)):
+          token_logits=final_logits[inde]
+          if torch.sum(token_logits).item()==0:
+            pred.append(-1)
+          else:
+            label_prob=F.softmax(token_logits,dim=-1)
+            pred_label=torch.argmax(label_prob,dim=-1).item()
+            pred.append(pred_label)
+          y_true.append(result_dict['sentiment_labels_list'][i][inde])
+        ##Nhãn dự đoán của toàn batch và nhãn đúng
+        pred_list.append(pred)
+        y_true_list.append(y_true)
+        lossS=sentiment_loss(pred_list,y_true_list,ignore_index=-1)'''
       
       ##Getting label of aspect tokens:
       labels=[-1]*len(final_logits)
@@ -345,11 +385,15 @@ class MatchingModule(nn.Module):
         max_index=torch.argmax(token).item()
         labels[inde]=max_index
 
+      if 'deberta' in self.args.model_type:
+        labels=self.filtered_sentiments(labels,batch_dict['texts'][i],self._tokenizer)
+
       predicts_list.append(labels)
-      aspects_list=self.filterOutput(result_dict['A2O_aspects_list'][i],result_dict['O2A_aspects_list'][i])
-      opinions_list=self.filterOutput(result_dict['A2O_opinions_list'][i],result_dict['O2A_opinions_list'][i])
+      aspects_list=self.filterOutput(result_dict['A2O_aspects_list'][i],result_dict['O2A_aspects_list'][i],batch_dict['texts_ids'][i],batch_dict['texts'][i],self._tokenizer,ignore_index=batch_dict['ignore_indexes'][i])
+      opinions_list=self.filterOutput(result_dict['A2O_opinions_list'][i],result_dict['O2A_opinions_list'][i],batch_dict['texts_ids'][i],batch_dict['texts'][i],self._tokenizer,ignore_index=batch_dict['ignore_indexes'][i])
       _aspects_list.append(aspects_list)
       _opinions_list.append(opinions_list)
+    ##lossS=1/len(result_dict['A2O_aspects_list'])*lossS
     return _aspects_list,_opinions_list,predicts_list,result_dict['lossA'],result_dict['lossO'],lossS
   
   def matching(self,aspect_hidden_states,opinion_hidden_states,aspect_terms,opinion_terms,calc_type='all',direct=None):
@@ -406,7 +450,7 @@ class MatchingModule(nn.Module):
             A[idx,idy]=torch.exp(score[idx,idy])/torch.exp(torch.sum(score[idx]))
     return A,asp_index
 
-  def filterOutput(self,first_output,second_output):
+  def filterOutput(self,first_output,second_output,text_ids,text,_tokenizer=None,ignore_index=[]):
     '''
     Hàm để xử lý dữ liệu đầu ra cuối cùng:
       + Sau RoeFlipped Module ta hiện đang có hai danh sách aspect và hai danh sách opinion.
@@ -419,7 +463,7 @@ class MatchingModule(nn.Module):
       filtered_output.add((output[0],output[-1]))
     
     ##Adding second output to the filters
-    for outputs in second_output:
+    for output in second_output:
       filtered_output.add((output[0],output[-1]))
     
     filtered_output=sorted(list(filtered_output),key=lambda x:(x[0],x[1]))
@@ -427,7 +471,6 @@ class MatchingModule(nn.Module):
       filtered_output[i]=list(filtered_output[i])
     ##Filtered
     remove_ind=[]
-    fixing_ind=[]
     idx=0
     idy=1
     while idx<len(filtered_output)-1 and idy<len(filtered_output):
@@ -461,7 +504,52 @@ class MatchingModule(nn.Module):
     remove_ind=sorted(remove_ind)
     for ind in remove_ind[::-1]:
       filtered_output.pop(ind)
+
+    if 'deberta' in self.args.model_type:
+      index=torch.tensor(ignore_index)
+      ignore_index=(index == -1).nonzero(as_tuple=True)[0]
+      temp_text=[token.lower() for token in text]
+      for i in range(len(filtered_output)):
+        output=filtered_output[i]
+        text_ids_index=text_ids[output[0]:output[1]+1]
+        j=output[1]+1
+        while j<len(text_ids) and j in ignore_index:
+          text_ids_index.append(text_ids[j])
+        result_text=_tokenizer.decode(text_ids_index,clean_up_tokenization_spaces=False).split()
+        all_match=self.find_sub_list(result_text,temp_text)
+        min_match=0
+        match_distance=abs(all_match[0][0]-output[0])
+        for a in range(len(all_match[1:])):
+          match=all_match[a]
+          if abs(match[0]-output[0])<match_distance:
+            min_match=a
+            match_distance=abs(match[0]-output[0])
+        filtered_output[i]=list(all_match[min_match])
+
     return filtered_output
+
+  def find_sub_list(self,sl,l):
+    results=[]
+    sll=len(sl)
+    for ind in (i for i,e in enumerate(l) if e==sl[0]):
+        if l[ind:ind+sll]==sl:
+            results.append((ind,ind+sll-1))
+
+    return results
+
+  def filtered_sentiments(self,labels,text,_tokenizer=None):
+    i=0
+    j=0
+    sentiments=[]
+    temp_text=[token.lower() for token in text]
+    while i<len(labels) and j<len(temp_text):
+      ids=_tokenizer.encode(temp_text[j],add_special_tokens=False)
+      sentiments.append(labels[i])
+      i+=len(ids)
+      j+=1
+    return sentiments
+
+
 
 #Grab everything in to one model:
 class RFMRC(nn.Module):

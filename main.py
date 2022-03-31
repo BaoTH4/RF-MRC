@@ -1,7 +1,9 @@
 from statistics import mode
 from utils import get_logger
 import torch
+from torch.autograd import Variable
 from model import RFMRC
+#from model_deberta import RFMRC
 import os
 from torch.optim import Adam
 from transformers import get_scheduler
@@ -35,10 +37,11 @@ def test(model,batch_generator,standard,logger=None):
     asp_pol_pair_labels=[]
     for asp_pol in standard[batch_index]['asp_pol_target']:
       sent_targets.append([asp_pol[0],asp_pol[-1]])
+      sent_labels.append([asp_pol[0],sentiments[0][asp_pol[0]]])
       
-    for idx in range(len(sentiments[0])):
+    '''for idx in range(len(sentiments[0])):
       if sentiments[0][idx]!=-1:
-        sent_labels.append([idx,sentiments[0][idx]])
+        sent_labels.append([idx,sentiments[0][idx]])'''
 
     for asp in aspect_terms[0]:
       asp_pol_pair_labels.append(asp+[sentiments[0][asp[0]]])
@@ -118,12 +121,12 @@ def test(model,batch_generator,standard,logger=None):
       'Overall-F1':overall_f1
   }
 
-logger=get_logger('/content/drive/MyDrive/Projects/Aspect based sentiment analysis/MRC approach/RF - MRC/logs.txt')
+logger=get_logger('./logs.txt')
 
 def main(args):
   ##Getting path to data
-  logger.info(f"Version: {args.version}")
-  data_path=f'{args.data_path}/data.pt'
+  #logger.info(f"Version: {args.version}")
+  data_path=f'{args.data_path}/data_deberta_v3_xsmall.pt'
   standard_data_path = f"{args.data_path}/data_standard.pt"
 
   ##Loading data
@@ -148,14 +151,14 @@ def main(args):
   logger.info(args)
 
   if args.mode=='train':
-    args.save_model_path_ae = args.save_model_path + args.data_name + '_' + 'best_dev_ae_f1' + '.pth'
-    args.save_model_path_oe = args.save_model_path + args.data_name + '_' + 'best_dev_oe_f1' + '.pth'
-    args.save_model_path_asc = args.save_model_path + args.data_name + '_' + 'best_dev_asc_f1' + '.pth'
-    args.save_model_path_overall = args.save_model_path + args.data_name + '_' + 'best_dev_overall_f1' + '.pth'
-    args.save_model_path_test_ae = args.save_model_path + args.data_name + '_' + 'best_test_ae_f1' + '.pth'
-    args.save_model_path_test_oe = args.save_model_path + args.data_name + '_' + 'best_test_oe_f1' + '.pth'
-    args.save_model_path_test_asc = args.save_model_path + args.data_name + '_' + 'best_test_asc_f1' + '.pth'
-    args.save_model_path_test_overall = args.save_model_path + args.data_name + '_' + 'best_test_overall_f1' + '.pth'
+    args.save_model_path_ae = args.save_model_path + '/' + args.model_type + '/' + args.data_name + '_' + 'best_dev_ae_f1' + '.pth'
+    args.save_model_path_oe = args.save_model_path + '/' + args.model_type + '/' + args.data_name + '_' + 'best_dev_oe_f1' + '.pth'
+    args.save_model_path_asc = args.save_model_path + '/' + args.model_type + '/' + args.data_name + '_' + 'best_dev_asc_f1' + '.pth'
+    args.save_model_path_overall = args.save_model_path + '/' + args.model_type + '/' + args.data_name + '_' + 'best_dev_overall_f1' + '.pth'
+    args.save_model_path_test_ae = args.save_model_path + '/' + args.model_type + '/' + args.data_name + '_' + 'best_test_ae_f1' + '.pth'
+    args.save_model_path_test_oe = args.save_model_path + '/' + args.model_type + '/' + args.data_name + '_' + 'best_test_oe_f1' + '.pth'
+    args.save_model_path_test_asc = args.save_model_path + '/' + args.model_type + '/' + args.data_name + '_' + 'best_test_asc_f1' + '.pth'
+    args.save_model_path_test_overall = args.save_model_path + '/' + args.model_type + '/' + args.data_name + '_' + 'best_test_overall_f1' + '.pth'
     batch_num_train = train_data.batch_num_train(args.batch_size)
 
     # optimizer
@@ -201,6 +204,10 @@ def main(args):
         _,_,_,lossA,lossO,lossS=model(batch_dict,model_mode='train')
         ##Calculate loss
         loss_sum=args.alpha*lossA+args.beta*lossO+args.gamma*lossS
+
+        if 'deberta' in args.model_type:
+          loss_sum = loss_sum.type(torch.cuda.FloatTensor)
+          loss_sum = Variable(loss_sum, requires_grad=True).cuda()
         
         loss_sum.backward()
         optimizer.step()
@@ -209,7 +216,7 @@ def main(args):
       ##train_logger  
       if batch_index % 10 == 0:
        logger.info('Epoch:[{}/{}]\t Batch:[{}/{}]\t Loss Sum:{}\t '
-                  'forward Loss:{};{}\t backward Loss:{};{}\t Sentiment Loss:{}'.
+                  'Aspect Loss:{};{}\t Opinion Loss:{};{}\t Sentiment Loss:{}'.
                   format(epoch, args.epoch_num, batch_index, batch_num_train,
                           round(loss_sum.item(), 4),
                           round(lossA.item(), 4), round(lossA.item(), 4),
@@ -270,6 +277,9 @@ def main(args):
         logger.info('Model for best test overall saved after epoch {}'.format(epoch))
         state = {'net': model.state_dict(), 'optimizer': optimizer.state_dict(), 'epoch': epoch}
         torch.save(state, args.save_model_path_test_overall)
+      
+      ##Notice about epoch
+      print(f'Epoch {epoch} done!')
   elif args.mode=='test':
       logger.info('start testing......')
       test_dataset = generating_model_dataset(test_data,1,shuffle=False,drop_last=False,istrain=False,ifgpu=args.ifgpu)
@@ -288,18 +298,18 @@ if __name__=='__main__':
     parser = argparse.ArgumentParser(description='Role Flipped Machine Reading Comprehension')
     parser.add_argument('--data_path', type=str, default="./data/14lapV2/preprocess/")
     parser.add_argument('--log_path', type=str, default="./log/")
-    parser.add_argument('--data_name', type=str, default="14lap", choices=["14lap", "14rest", "15rest", "16rest"])
+    parser.add_argument('--data_name', type=str, default="14lap", choices=["14lap", "14res", "15rest", "16rest"])
 
     parser.add_argument('--mode', type=str, default="train", choices=["train", "test"])
 
     parser.add_argument('--reload', type=bool, default=False)
     parser.add_argument('--checkpoint_path', type=str, default="./model/14lap/modelFinal.model")
-    parser.add_argument('--save_model_path', type=str, default="./model/")
+    parser.add_argument('--save_model_path', type=str, default="./model_deberta")
     parser.add_argument('--model_name', type=str, default="1")
 
     # model hyper-parameter
-    parser.add_argument('--bert_model_type', type=str, default="bert-base-uncased")
-    parser.add_argument('--hidden_size', type=int, default=768)
+    parser.add_argument('--model_type', type=str, default="microsoft/deberta-v3-xsmall")
+    parser.add_argument('--hidden_size', type=int, default=384)
 
     # training hyper-parameter
     parser.add_argument('--ifgpu', type=bool, default=True)
@@ -308,7 +318,7 @@ if __name__=='__main__':
     parser.add_argument('--learning_rate', type=float, default=1e-5)
     parser.add_argument('--p',type=int,default=8)
     parser.add_argument('--q',type=int,default=5)
-    parser.add_argument('--T',type=int,defualt=2)
+    parser.add_argument('--T',type=int,default=2)
     parser.add_argument('--lambda_aspect',type=float,default=1)
     parser.add_argument('--lambda_opinion',type=float,default=1)
     parser.add_argument('--alpha',type=float,default=1)
