@@ -4,6 +4,14 @@ Flipped Machine Reading Comprehension" (Link: (https://aclanthology.org/2021.fin
 
 Author: Guoxin Yu, Jiwei Li, Ling Luo, Yuxian Meng, Xiang Ao, Qing He
 
+# Environment Configuration
+```
+python 3.9
+transformer 4.17.0
+pytorch
+sentencepiece 0.1.96
+```
+
 # Data preprocess
 
 ```
