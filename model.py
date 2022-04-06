@@ -1,6 +1,6 @@
 import torch.nn as nn
 from transformers import BertTokenizer,BertModel, DebertaV2Tokenizer, DebertaV2Model
-from utils import calculate_A_O_loss, sentiment_loss
+from utils import calculate_A_O_loss, sentiment_loss, is_one_exist
 from dataset_support import generating_next_query
 import torch
 import torch.nn.functional as F
@@ -19,12 +19,8 @@ class BertFFNN(nn.Module):
     super(BertFFNN,self).__init__()
     if 'deberta' in args.model_type:
       self._bert = DebertaV2Model.from_pretrained(args.model_type)
-      self._tokenizer = DebertaV2Tokenizer.from_pretrained(args.model_type)
-      self.sep_id=2
     else:
       self._bert = BertModel.from_pretrained(args.model_type)
-      self._tokenizer = BertTokenizer.from_pretrained(args.model_type)
-      self.sep_id=102
 
     print(f"Loaded `{args.model_type}` model !")
     
@@ -171,13 +167,13 @@ class RoleFlippedModule(nn.Module):
       passenge_labels=prob_label[passenge_index].squeeze(1)
       passenge_prob_vals=prob_val[passenge_index].squeeze(1)
       _,index_list=torch.sort(passenge_prob_vals,descending=True)
-      if 'deberta' in self.model_type:
+      if 'deberta' in self.args.model_type:
         index=torch.tensor(batch_dict['ignore_indexes'][i])
         ignore_index=(index == -1).nonzero(as_tuple=True)[0]
       else:
         ignore_index=torch.tensor([])
       ##Tương tự xử lý khi không xuất hiện nhãn 1 trong dự đoán
-      if 1 not in passenge_labels:
+      if is_one_exist(passenge_labels,ignore_index)==False:
         if model_mode=='train':
           ##In training process if doesn't find any B label we use grouth truth to learning
           ##Teacher forcing
@@ -225,7 +221,7 @@ class RoleFlippedModule(nn.Module):
       passenge_prob_vals=prob_val[passenge_index].squeeze(1)
       _,index_list=torch.sort(passenge_prob_vals,descending=True)
       ##Xử lý khi nhãn 1 không có trong dự đoán, tiến hành như trên kia
-      if 1 not in passenge_labels:
+      if is_one_exist(passenge_labels,ignore_index)==False:
         if model_mode=='train':
           ##In training process if doesn't find any B label we use grouth truth to learning
           ##Teacher forcing
@@ -298,7 +294,7 @@ class MatchingModule(nn.Module):
     _opinions_list=[]
     lossS=0
     for i in range(len(result_dict['A2O_aspects_list'])):
-      if 'deberta' in self.model_type:
+      if 'deberta' in self.args.model_type:
         index=torch.tensor(batch_dict['ignore_indexes'][i])
         ignore_index=(index == -1).nonzero(as_tuple=True)[0]
       else:
@@ -360,7 +356,71 @@ class MatchingModule(nn.Module):
           temp_sentiments=torch.tensor(temp_sentiments)
           weight = torch.tensor([1,2,4]).float()
 
+        ###Techer Forcing cho trường hợp temp_sentiments hoàn toàn chứa trù 1
+
+        if torch.all(temp_sentiments == -1).item() == True:
+
+          ##Creating new aspect terms list
+          asp_answer=torch.tensor(batch_dict['aspect_answers'][i])
+          asp_one_index=(asp_answer == 1).nonzero(as_tuple=True)[0]
+          asp_two_index=(asp_answer == 2).nonzero(as_tuple=True)[0]
+          new_aspect_term=self._create_new_term_list(asp_one_index,asp_two_index)
+
+          ##Creating new opinion terms list
+          opi_answer=torch.tensor(batch_dict['opinion_answers'][i])
+          opi_one_index=(opi_answer == 1).nonzero(as_tuple=True)[0]
+          opi_two_index=(opi_answer == 2).nonzero(as_tuple=True)[0]
+          new_opinion_term=self._create_new_term_list(opi_one_index,opi_two_index)
+
+          ##A2O
+          A2O_aspect_hidden_states=result_dict['A2O_aspect_hidden_states'][i]
+          A2O_opinion_hidden_states=result_dict['A2O_opinion_hidden_states'][i]
+          final_hidden_states=self.matching(A2O_aspect_hidden_states,A2O_opinion_hidden_states,new_aspect_term,new_opinion_term,calc_type='all',direct='A2O')
+          A2O_logits=[]
+          for idx in range(len(final_hidden_states)):
+            row=final_hidden_states[idx]
+            if torch.sum(row).item()==0 or idx in ignore_index:
+              A2O_logits.append([0]*3)
+            else:
+              A2O_logits.append(self.sent_ffnn_A2O(row).tolist())
+
+          ##O2A
+          O2A_aspect_hidden_states=result_dict['O2A_aspect_hidden_states'][i]
+          O2A_opinion_hidden_states=result_dict['O2A_opinion_hidden_states'][i]
+          final_hidden_states=self.matching(O2A_aspect_hidden_states,O2A_opinion_hidden_states,new_aspect_term,new_opinion_term,calc_type='all',direct='O2A')
+          O2A_logits=[]
+          for idx in range(len(final_hidden_states)):
+            row=final_hidden_states[idx]
+            if torch.sum(row).item()==0 or idx in ignore_index:
+              O2A_logits.append([0]*3)
+            else:
+              O2A_logits.append(self.sent_ffnn_O2A(row).tolist())
+
+          ##Final Decision (nhãn sentiment của một token sẽ là trung bình cộng của hai chiều)
+          A2O_logits=torch.tensor(A2O_logits)
+          O2A_logits=torch.tensor(O2A_logits)
+          final_logits=0.5*(A2O_logits+O2A_logits)
+
+
+          temp_final_logits=[]
+          temp_sentiments=[]
+          ##Trích xuất ra đúng những nhãn và logits của những tokens có logits khác không
+          for inde in range(len(final_logits)):
+            token_logits=final_logits[inde]
+            if torch.sum(token_logits).item()==0:
+              continue
+            temp_final_logits.append(token_logits.tolist())
+            temp_sentiments.append(result_dict['sentiment_labels_list'][i][inde])
+
+          if self.args.ifgpu==True:
+            temp_final_logits=torch.tensor(temp_final_logits).cuda()
+            temp_sentiments=torch.tensor(temp_sentiments).cuda()
+          else:
+            temp_final_logits=torch.tensor(temp_final_logits)
+            temp_sentiments=torch.tensor(temp_sentiments)
+        
         lossS+=F.cross_entropy(temp_final_logits,temp_sentiments,weight=weight,ignore_index=-1)
+        # lossS=(1/self.args.batch_size)*lossS
       
       '''if model_mode=='train':
         pred=[]
@@ -397,7 +457,8 @@ class MatchingModule(nn.Module):
       opinions_list=self.filterOutput(result_dict['A2O_opinions_list'][i],result_dict['O2A_opinions_list'][i],batch_dict['texts_ids'][i],batch_dict['texts'][i],self._tokenizer,ignore_index=batch_dict['ignore_indexes'][i])
       _aspects_list.append(aspects_list)
       _opinions_list.append(opinions_list)
-    ##lossS=1/len(result_dict['A2O_aspects_list'])*lossS
+    if model_mode=='train':
+      lossS=(1/self.args.batch_size)*lossS
     return _aspects_list,_opinions_list,predicts_list,result_dict['lossA'],result_dict['lossO'],lossS
   
   def matching(self,aspect_hidden_states,opinion_hidden_states,aspect_terms,opinion_terms,calc_type='all',direct=None):
@@ -519,17 +580,18 @@ class MatchingModule(nn.Module):
         j=output[1]+1
         while j<len(text_ids) and j in ignore_index:
           text_ids_index.append(text_ids[j])
+          j+=1
         result_text=_tokenizer.decode(text_ids_index,clean_up_tokenization_spaces=False).split()
         all_match=self.find_sub_list(result_text,temp_text)
         min_match=0
         match_distance=abs(all_match[0][0]-output[0])
-        for a in range(len(all_match[1:])):
+        for a in range(1,len(all_match)):
           match=all_match[a]
           if abs(match[0]-output[0])<match_distance:
             min_match=a
             match_distance=abs(match[0]-output[0])
         filtered_output[i]=list(all_match[min_match])
-
+    
     return filtered_output
 
   def find_sub_list(self,sl,l):
@@ -552,6 +614,19 @@ class MatchingModule(nn.Module):
       i+=len(ids)
       j+=1
     return sentiments
+
+  def _create_new_term_list(self,one_index,two_index):
+    full_result=[]
+    for idx in one_index:
+      result=[]
+      idx=idx.item()
+      result.append(idx)
+      idy=idx+1
+      while idy in two_index:
+        result.append(idy)
+        idy+=1
+    full_result.append(result)
+    return full_result
 
 
 

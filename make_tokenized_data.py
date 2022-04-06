@@ -90,9 +90,11 @@ def tokenized_and_process(data, args,mode='train'):
         opinion_queries_ids=_tokenizer.encode(' '.join(opinion_question).lower(),add_special_tokens=False)
         opinion_question_id_list.append(opinion_queries_ids)
 
-
+        ##Điều chỉnh lại nhãn cho phù hợp với encode của deberta
+        temp_text_ids=[]
         for ind,tok in enumerate(temp_text):
             ids=_tokenizer.encode(tok.lower(),add_special_tokens=False)
+            temp_text_ids+=ids
             aspect_answer.append(sample.aspect_answers[ind])
             opinion_answer.append(sample.opinion_answers[ind])
             sentiment.append(sample.sentiments[ind])
@@ -102,6 +104,10 @@ def tokenized_and_process(data, args,mode='train'):
                 aspect_answer.append(-1)
                 opinion_answer.append(-1)
                 sentiment.append(-1)
+
+
+        assert temp_text_ids==text_ids ##Đảm bảo giữa phần encode từng từ và encode nguyên câu là giống nhau
+        assert len(ignore_index)==len(aspect_answer)==len(opinion_answer)==len(sentiment)==len(text_ids) ###Đảm bảo phần nhãn nằm đúng ở các vị trí
                 
         #Apsect answer
         aspect_answer_list.append(aspect_answer)
@@ -134,8 +140,8 @@ def tokenized_and_process(data, args,mode='train'):
 if __name__=='__main__':
     parser = argparse.ArgumentParser(description='Processing data')
     ##Define path where save unprocessed data and where to save processed data
-    parser.add_argument('--data_path', type=str, default="./data/14lapV2/preprocess")
-    parser.add_argument('--output_path', type=str, default="./data/14lapV2/preprocess")
+    parser.add_argument('--data_path', type=str, default="./data/14resV2/preprocess")
+    parser.add_argument('--output_path', type=str, default="./data/14resV2/preprocess")
     parser.add_argument('--model_type',type=str,default='microsoft/deberta-v3-xsmall')
     
     args=parser.parse_args()

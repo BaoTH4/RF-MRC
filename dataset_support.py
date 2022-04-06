@@ -3,6 +3,7 @@
 import random
 import torch
 import torch.nn.functional as F
+from utils import is_one_exist
 
 ##CLS_id=101 ##For BERT
 #SEP_id=102 ##For BERT
@@ -16,7 +17,7 @@ def generating_batch_index(dataset,batch_size,shuffle=True,drop_last=False):
   '''
   idx_list=[i for i in range(dataset.__len__())]
   if shuffle==True:
-    random.Random(42).shuffle(idx_list)
+    random.shuffle(idx_list)
   ##Slitting idx into batch
   start=0
   end=start+batch_size
@@ -59,7 +60,7 @@ def generating_one_query(sample,query_type='initial',max_len=None,outside_query=
     ##Generating token type ids
     token_type_ids=[0]*2+[1]*(len(question)-2+padding_num)
 
-    ##Genearating aspect answer
+    ##Genearating aspect and opinion answer
     if model_mode=='train':
       aspect_answer=[-1]*2+sample['aspect_answer']+[0]+[-1]*padding_num
       opinion_answer=[-1]*2+sample['opinion_answer']+[0]+[-1]*padding_num
@@ -230,7 +231,7 @@ def padding_query_batch(input_ids_list,attention_mask_list,token_type_ids_list,a
 def generating_next_query(batch_dict,logits,last_queries,args,query_type='aspect',model_mode='train'):
   '''
     Hàm này sinh dữ liệu query cho bước tiếp theo của multi hop, query_type là biến quyết định sẽ sinh
-      ra dạng câu hỏi nào chi query type
+      ra dạng câu hỏi nào cho query type
     + Hướng xử lý trường hợp sau khi softmax không sinh ra nhãn 1-(begin aspect hay begin opinion)
       -   Nếu đang trong quá trình train - sử dụng chính ground truth làm query tiếp theo (teacher forcing)
       - Trường hợp model ở mode khác train, sẽ lấy top p vị trí có xác suất gán nhãn 1 cao nhất (tuy nhiên 
@@ -255,7 +256,7 @@ def generating_next_query(batch_dict,logits,last_queries,args,query_type='aspect
     else:
       ignore_index=torch.tensor([])
     ##Xử lý khi 1 không có trong labels của bước multi hop hiện tại
-    if 1 not in labels:
+    if is_one_exist(labels,ignore_index)==False:
       if model_mode=='train':
         input_ids,attention_mask,token_type_ids,answer=generating_one_query(batch_dict,query_type=query_type,index=idx)
       else:
@@ -300,6 +301,8 @@ def generating_next_query(batch_dict,logits,last_queries,args,query_type='aspect
       count=0
       for index in _top_ind:
         inde=index.item()
+        if inde in two_index or inde in ignore_index:
+          continue
         if inde in one_index:
           outside_query.append(batch_dict['texts_ids'][idx][inde])
           count+=1

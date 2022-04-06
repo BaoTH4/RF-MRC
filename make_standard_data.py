@@ -49,8 +49,8 @@ if __name__=='__main__':
     ##Make standard data to evaluate and compare the result
     parser = argparse.ArgumentParser(description='Making standard data')
     ##Define path where save unprocessed data and where to save processed data
-    parser.add_argument('--data_path', type=str, default="./data/14lapV2")
-    parser.add_argument('--output_path', type=str, default="./data/14lapV2/preprocess")
+    parser.add_argument('--data_path', type=str, default="./data/14resV2")
+    parser.add_argument('--output_path', type=str, default="./data/14resV2/preprocess")
 
     args=parser.parse_args()
 

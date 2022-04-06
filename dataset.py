@@ -1,4 +1,4 @@
-from torch.utils.data import Dataset, Dataloader
+from torch.utils.data import Dataset, DataLoader
 
 ##First Sample
 class BasicSample(object):
@@ -53,6 +53,7 @@ class ProcessedIdDataset(Dataset):
     self.opinion_questions_ids=pre_data.get('opinion_questions_ids',None)
     self.aspect_answers=pre_data.get('aspect_answers',None)
     self.sentiments=pre_data.get('sentiments',None)
+    self.ignore_indexes=pre_data.get('ignore_indexes',None)
 
   def printIndexSample(self,idx):
     print(f'Information of number {idx} sample:')
@@ -65,6 +66,7 @@ class ProcessedIdDataset(Dataset):
     print(f'Opinion question ids: {self.opinion_questions_ids[idx]}')
     print(f'Aspect answer: {self.aspect_answers[idx]}')
     print(f'Sentimets: {self.sentiments[idx]}')
+    print(f'Ignore index: {self.ignore_indexes[idx]}')
 
   def __len__(self):
     return len(self.texts)
@@ -82,5 +84,6 @@ class ProcessedIdDataset(Dataset):
         'opinion_question':self.opinion_questions[idx],
         'opinion_question_ids':self.opinion_questions_ids[idx],
         'aspect_answer':self.aspect_answers[idx],
-        'sentiment':self.sentiments[idx]
+        'sentiment':self.sentiments[idx],
+        'ignore_index':self.ignore_indexes[idx]
     }

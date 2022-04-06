@@ -6,7 +6,7 @@ from model import RFMRC
 #from model_deberta import RFMRC
 import os
 from torch.optim import Adam
-from transformers import get_scheduler
+from transformers import get_scheduler,AdamW,get_linear_schedule_with_warmup
 from dataset_support import generating_model_dataset
 import argparse
 
@@ -164,6 +164,12 @@ def main(args):
     # optimizer
     logger.info('initial optimizer......')
     optimizer = Adam(model.parameters(),lr=args.learning_rate)
+    # param_optimizer = list(model.named_parameters())
+    # optimizer_grouped_parameters = [
+    #         {'params': [p for n, p in param_optimizer if "_bert" in n], 'weight_decay': 0.01},
+    #         {'params': [p for n, p in param_optimizer if "_bert" not in n],
+    #          'lr': args.learning_rate, 'weight_decay': 0.01}]
+    # optimizer = AdamW(optimizer_grouped_parameters, lr=1e-5, correct_bias=False)
 
     # load saved model, optimizer and epoch num
     if args.reload and os.path.exists(args.checkpoint_path):
@@ -180,7 +186,7 @@ def main(args):
     # scheduler
     training_steps = args.epoch_num * batch_num_train
     ##warmup_steps = int(training_steps * args.warm_up)
-    scheduler = get_scheduler('linear',optimizer,num_warmup_steps=0, num_training_steps=training_steps)
+    scheduler = get_linear_schedule_with_warmup(optimizer,num_warmup_steps=0, num_training_steps=training_steps)
 
     # training
     logger.info('begin training......')
@@ -198,24 +204,33 @@ def main(args):
       model.zero_grad()
 
       train_dataset = generating_model_dataset(train_data,args.batch_size,shuffle=True,drop_last=False,istrain=True,ifgpu=args.ifgpu)
+      
       for batch_index, batch_dict in enumerate(train_dataset):
         optimizer.zero_grad()
 
         _,_,_,lossA,lossO,lossS=model(batch_dict,model_mode='train')
+
         ##Calculate loss
         loss_sum=args.alpha*lossA+args.beta*lossO+args.gamma*lossS
 
-        if 'deberta' in args.model_type:
-          loss_sum = loss_sum.type(torch.cuda.FloatTensor)
-          loss_sum = Variable(loss_sum, requires_grad=True).cuda()
+        # if 'deberta' in args.model_type:
+
+        #  ##loss_sum = loss_sum.type(torch.cuda.FloatTensor)
+        #   ##loss_sum = Variable(loss_sum, requires_grad=True).cuda()'''
+        #   loss_sum_2=loss_sum.float()
+        #   loss_sum_2=Variable(loss_sum_2,requires_grad=True).cuda()
+
+        #   # loss_sum_2.grad_fn=loss_sum.grad_fn
+        #   # loss_sum=loss_sum_2
+        #   print(loss_sum_2.grad_fn)
         
         loss_sum.backward()
         optimizer.step()
         scheduler.step()
 
       ##train_logger  
-      if batch_index % 10 == 0:
-       logger.info('Epoch:[{}/{}]\t Batch:[{}/{}]\t Loss Sum:{}\t '
+        if batch_index % 10 == 0:
+          logger.info('Epoch:[{}/{}]\t Batch:[{}/{}]\t Loss Sum:{}\t '
                   'Aspect Loss:{};{}\t Opinion Loss:{};{}\t Sentiment Loss:{}'.
                   format(epoch, args.epoch_num, batch_index, batch_num_train,
                           round(loss_sum.item(), 4),
@@ -279,7 +294,7 @@ def main(args):
         torch.save(state, args.save_model_path_test_overall)
       
       ##Notice about epoch
-      print(f'Epoch {epoch} done!')
+      logger.info('Epoch {} done!'.format(epoch))
   elif args.mode=='test':
       logger.info('start testing......')
       test_dataset = generating_model_dataset(test_data,1,shuffle=False,drop_last=False,istrain=False,ifgpu=args.ifgpu)
@@ -296,14 +311,14 @@ def main(args):
         
 if __name__=='__main__':
     parser = argparse.ArgumentParser(description='Role Flipped Machine Reading Comprehension')
-    parser.add_argument('--data_path', type=str, default="./data/14lapV2/preprocess/")
+    parser.add_argument('--data_path', type=str, default="./data/14resV2/preprocess/")
     parser.add_argument('--log_path', type=str, default="./log/")
-    parser.add_argument('--data_name', type=str, default="14lap", choices=["14lap", "14res", "15rest", "16rest"])
+    parser.add_argument('--data_name', type=str, default="14res", choices=["14lap", "14res", "15rest", "16rest"])
 
     parser.add_argument('--mode', type=str, default="train", choices=["train", "test"])
 
     parser.add_argument('--reload', type=bool, default=False)
-    parser.add_argument('--checkpoint_path', type=str, default="./model/14lap/modelFinal.model")
+    parser.add_argument('--checkpoint_path', type=str, default="./model/14res/modelFinal.model")
     parser.add_argument('--save_model_path', type=str, default="./model_deberta")
     parser.add_argument('--model_name', type=str, default="1")
 
